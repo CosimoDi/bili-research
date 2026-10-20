@@ -1,3 +1,5 @@
 faster-whisper==1.2.1
 yt-dlp==2026.8.19
 av==18.1.0
+qrcode==8.2
+pypng==0.20220715.0

@@ -29,11 +29,16 @@ python3 scripts/package_skill.py --install-to ~/.codex/skills/bili-research
 ```bash
 python3 skills/bili-research/scripts/bili.py doctor
 python3 skills/bili-research/scripts/setup.py
-python3 skills/bili-research/scripts/bili.py configure
-python3 skills/bili-research/scripts/bili.py doctor --online
+python3 skills/bili-research/scripts/bili.py new --goal "阅读大学相关视频" --count 10 --persona "对校园生活还在摸索的大一学生"
+python3 skills/bili-research/scripts/bili.py login --task <上一步返回的任务ID>
+python3 skills/bili-research/scripts/bili.py login --poll --wait 60
 ```
 
-`configure` 在用户本地终端隐藏输入凭据；不在聊天中粘贴 Cookie。其他 Agent 的准备与调用说明见 [SKILL.md](skills/bili-research/SKILL.md)、[准备运行](skills/bili-research/references/setup.md) 和 [调用协议](skills/bili-research/references/protocol.md)。
+Agent 展示 `login` 返回的本地二维码，用户用 B 站 App 扫码并在手机端确认。程序自动保存凭据、验证登录并请求打开当前任务的日记。等待扫码或确认时继续轮询；出现网络、风控或过期状态时按返回结果处理，不自动循环重登。
+
+有内嵌浏览器的宿主可在轮询命令中加 `--no-browser`，由宿主打开返回的 `report.url`。已有有效凭据时运行 `doctor --online`，通过后执行 `open-diary --task <任务ID>`；先确认日记页面可见，再检索视频。
+
+`configure` 保留为本地隐藏输入的备用方式。准备与调用说明见 [SKILL.md](skills/bili-research/SKILL.md)、[准备运行](skills/bili-research/references/setup.md) 和 [调用协议](skills/bili-research/references/protocol.md)。
 
 ## 结构与职责
 
@@ -42,7 +47,9 @@ python3 skills/bili-research/scripts/bili.py doctor --online
 | `skills/bili-research/scripts/bili_core/api.py` | 只读 B 站 API：检索、全部分 P 元信息、字幕、评论样本 |
 | `skills/bili-research/scripts/bili_core/media.py` | 字幕优先或 Whisper 优先；完整音频转写，显式按需抽帧 |
 | `skills/bili-research/scripts/bili_core/engine.py` | SQLite 事务、交付回执、逐条日记、动态计数、恢复和导出 |
-| `skills/bili-research/scripts/bili_core/report.py` | 本地 HTML 日记、原子更新与仅提供报告的本机预览 |
+| `skills/bili-research/scripts/bili_core/login.py` | 扫码状态、轮询节流、凭据保存与任务绑定 |
+| `skills/bili-research/scripts/bili_core/report.py` | 日记原文与点评展示、原子更新、页面自动同步 |
+| `skills/bili-research/scripts/bili_core/live_report.py` | 复用当前任务的本机预览服务并请求打开浏览器 |
 | `skills/bili-research/SKILL.md` | 研究视角、选片判断、日记质量、证据边界与后续任务 |
 | `upstream/dsh-bili-whale/` | 上游浅克隆参考，忽略提交 |
 | `tests/` | 离线协议与适配器验证 |
@@ -50,33 +57,38 @@ python3 skills/bili-research/scripts/bili.py doctor --online
 
 每个任务可指定 1–1000 条视频；一个 BV 的全部分 P 都纳入阅读。只有视频文字、评论样本、此前日记全部交付确认且本条日记通过结构与引用校验，才增加已完成数量。跳过不计数，达到数量后停止准备下一条。
 
+日记以原话摘录和逐条点评为主体，通常选 2–4 处视频或评论短摘录；程序校验摘录匹配原材料，并补充来源和时间位置。字幕与转写可能有识别误差，校验不证明原音或观点准确。旧日记可继续阅读。
+
 日记仅追加，心情状态承接上一条。旧日记在下一条视频前按顺序完整返回，长材料分页且不截断。程序校验交付与保存状态，无法证明模型已理解内容或实际保留了全部上下文。长期任务受宿主上下文容量约束，当前不自动压缩旧日记。
 
 字幕轨覆盖不足会触发整段音频 Whisper 转写，保留时间轴与缺口提示。默认不看画面；评论默认热评与最新评论共 30 条、最多 3 个线程各 10 条回复，明确标注为样本。图表、动作、纯视觉信息可能缺失，模拟用户反应不代表真实用户。
 
 ## 日记网页
 
-创建任务时生成空白日记网页；每完成一条视频和评论并保存日记，程序原子更新同一份 `journal.html`。页面展示累计感悟、心情变化、材料引用、证据范围和后续指令。调用 Agent 用宿主浏览器工具打开报告，后续刷新原标签；用户继续在原会话提出调研、比较或评价任务。
+扫码确认并验证账号后，程序先打开绑定任务的日记。页面把原话、来源和模拟用户的点评成对展示，并保留心情变化、累计感悟、未解问题和证据范围。用户继续在原会话提出调研、比较或评价任务。
 
-报告使用内置样式，无外部字体、脚本或图片。`report --task ID` 可为旧任务生成或修复网页。生成失败不会撤销已保存日记；打开失败也不会阻止下一条视频。浏览器不支持文件 URL 时，`serve-report --task ID` 启动仅绑定 `127.0.0.1` 的预览进程，只提供该任务报告，默认使用空闲端口。服务运行期间每次刷新读取最新页面，退出后 HTML 仍可离线阅读。
+每篇日记保存后，程序原子更新同一份 `journal.html`。本机 HTTP 预览每 3 秒同步变化，保留滚动位置和展开的说明；无需为每篇日记打开新标签。页面使用内置样式及固定同步脚本，无外部字体、脚本或图片。
 
-宿主需要可访问本机文件或预览服务的浏览器工具才能自动弹出页面；仅有聊天或远程隔离浏览器的平台需要其自身的文件预览／端口转发。CLI 返回页面位置，调用 Agent 负责通过宿主工具打开与刷新。
+`open-diary --task ID` 启动或复用只监听 `127.0.0.1` 的预览服务，仅提供当前任务的报告。`--no-browser` 返回 URL 供宿主内嵌浏览器打开；默认请求系统浏览器打开。打开请求被接受不等于页面可见，调用 Agent 仍需确认。预览失败先处理打开问题，再进入观看。
+
+`report --task ID` 可为旧任务生成或修复网页，生成失败不会撤销已保存日记。`serve-report --task ID` 可在前台运行服务，退出后 HTML 仍可离线阅读。远程隔离浏览器需要宿主提供本机预览或端口转发。
 
 ## 分发与验证
 
 ```bash
 python3 -m unittest discover -s tests -v
+python3 -m unittest discover -s skills/bili-research/scripts -p 'test_*.py' -v
 python3 scripts/package_skill.py
 python3 scripts/package_skill.py --install-to ~/.codex/skills/bili-research
 ```
 
 打包产物 `dist/bili-research.zip` 包含完整 Skill、工具、调用文档与第三方许可，不含凭据、任务数据或依赖环境。安装器核对内容哈希，拒绝覆盖内容不同的已有 Skill。其他平台可复制同一文件夹并注册其入口。
 
-已覆盖的离线验证包括 10 条双分 P 视频、长材料分页、完整旧日记回放、精确数量停止、重复去重、失败回滚、引用校验、心情连续性和账号缺项提示，以及日记网页追加、文本转义、生成失败恢复与预览服务访问范围。测试使用合成材料，不能替代真实 B 站验收。
+新增测试覆盖扫码状态、凭据不回显、确认后验证并打开绑定任务、预览服务复用、原话校验与来源展示。已有离线验证包括 10 条双分 P 视频、长材料分页、完整旧日记回放、精确数量停止、重复去重、失败回滚、引用校验、心情连续性和账号缺项提示，以及日记网页追加、文本转义、生成失败恢复与预览服务访问范围。测试使用合成材料，不能替代真实 B 站验收。
 
-真实验收步骤：用户本地配置账号 → `doctor --online` → 调用 Skill 看 1 条指定视频 → 验证字幕缺失时整段 Whisper → 再以用户指定主题与数量运行，检查日记、计数与后续评价。当前尚未验证账号接口、真实视频转写或真实研究输出质量。
+真实验收步骤：用户扫码确认 → 登录验证并打开日记 → 调用 Skill 看 1 条指定视频 → 验证字幕缺失时整段 Whisper → 再以用户指定主题与数量运行，检查日记、计数与后续评价。本轮已验证实际二维码生成；完整扫码到浏览器打开的流程、真实视频转写和研究输出质量仍需实测。
 
-定时主动运行由宿主自动化能力唤醒 Skill；本项目没有常驻守护进程。仅有聊天能力的平台需要另行部署工具服务。第三方复用范围与 MIT 许可见 [NOTICE.md](skills/bili-research/NOTICE.md)。
+定时主动运行由宿主自动化能力唤醒 Skill；观看任务由宿主驱动，本机预览服务用于持续展示日记。仅有聊天能力的平台需要另行部署工具服务。第三方复用范围与 MIT 许可见 [NOTICE.md](skills/bili-research/NOTICE.md)。
 
 ## 许可
 

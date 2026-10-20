@@ -185,8 +185,68 @@ def nonempty(value, label, maxlen=10000):
         raise Problem('invalid_diary', '%s 必须是非空文字，且不超过 %s 字。' % (label, maxlen))
 
 
+def validate_quotes(quotes, evidence):
+    if not isinstance(quotes, list) or not 1 <= len(quotes) <= 6:
+        raise Problem('invalid_quotes', 'quotes 需要 1–6 条原文摘录及逐条点评。')
+    sources = {}
+    for track_index, track in enumerate(evidence['transcripts']):
+        for index, segment in enumerate(track['segments']):
+            sources[segment['id']] = ('transcript', track_index, index, segment, track)
+    for comment in evidence['comments']['items']:
+        sources[comment['id']] = ('comment', None, None, comment, None)
+    resolved, kinds, seen = [], set(), set()
+    total = 0
+    compact = lambda text: ''.join(text.split())
+    for item in quotes:
+        if not isinstance(item, dict) or set(item) != {'text', 'evidence_ids', 'commentary'}:
+            raise Problem('invalid_quotes', '每条摘录需要 text、evidence_ids 和 commentary。')
+        nonempty(item['text'], '摘录原文', 160)
+        nonempty(item['commentary'], '摘录点评', 3000)
+        ids = item['evidence_ids']
+        if (not isinstance(ids, list) or not ids or
+                any(not isinstance(key, str) or key not in sources for key in ids) or len(set(ids)) != len(ids)):
+            raise Problem('invalid_quote_reference', '摘录须引用本视频的文字或评论材料 ID，不能引用图片。')
+        rows = [sources[key] for key in ids]
+        kind, track_index, index, first, track = rows[0]
+        if kind == 'comment':
+            if len(rows) != 1:
+                raise Problem('invalid_quote_reference', '一条评论摘录只能对应一条评论。')
+            source = {'kind': 'comment', 'label': '评论摘录', 'comment_id': ids[0]}
+        else:
+            if any(row[0] != kind or row[1] != track_index or row[2] != index + offset
+                   for offset, row in enumerate(rows)):
+                raise Problem('invalid_quote_reference', '跨字幕段摘录须按顺序引用同一分 P 的连续片段。')
+            part = track['part']
+            source = {'kind': 'transcript', 'track_source': track['source'],
+                      'label': '语音转写摘录（可能有识别误差）' if track['source'] == 'whisper' else '字幕摘录（未核对原音）',
+                      'page': part.get('page', 1) if isinstance(part, dict) else part,
+                      'start': first['start'], 'end': rows[-1][3]['end']}
+        texts = [compact(row[3]['text']) for row in rows]
+        quote = compact(item['text'])
+        full = ''.join(texts)
+        # Whitespace changes from subtitle line wrapping are harmless. Wording and
+        # punctuation must remain exact; a span must actually cover every cited segment.
+        positions = [pos for pos in range(len(full)) if full.startswith(quote, pos)]
+        if not any(pos < len(texts[0]) and pos + len(quote) > len(full) - len(texts[-1]) for pos in positions):
+            raise Problem('quote_text_mismatch', '摘录与引用原文不一致；保留原字词和标点，不拼接省略的片段。')
+        identity = (tuple(ids), quote)
+        if identity in seen:
+            raise Problem('duplicate_quote', '同一摘录不能重复提交。')
+        seen.add(identity)
+        total += len(item['text'])
+        kinds.add(kind)
+        resolved.append(dict(item, source=source))
+    if total > 480:
+        raise Problem('quotes_too_long', '原文摘录合计最多 480 字；请缩短引用并把重点写在点评中。')
+    if 'transcript' not in kinds:
+        raise Problem('missing_transcript_quote', '至少摘录一处视频文字并点评。')
+    if evidence['comments']['items'] and 'comment' not in kinds:
+        raise Problem('missing_comment_quote', '已获取评论样本，至少摘录一条评论中的原话并点评。')
+    return resolved
+
+
 def validate_diary(note, evidence, mood):
-    fields = {'summary', 'observations', 'reflection', 'mood_before', 'mood_after', 'mood_reason',
+    fields = {'summary', 'quotes', 'observations', 'reflection', 'mood_before', 'mood_after', 'mood_reason',
               'questions', 'next_interests', 'uncertainties'}
     if not isinstance(note, dict) or set(note) != fields:
         raise Problem('invalid_diary', '日记字段须与 references/protocol.md 一致。')
@@ -223,6 +283,7 @@ def validate_diary(note, evidence, mood):
         raise Problem('missing_transcript_reference', '日记需要引用视频文字材料。')
     if comment_ids and not (cited & comment_ids):
         raise Problem('missing_comment_reference', '已获取评论样本，日记须包含对评论的有依据观察。')
+    return validate_quotes(note['quotes'], evidence)
 
 
 def commit_diary(task, note):
@@ -236,8 +297,8 @@ def commit_diary(task, note):
         if db.execute('SELECT count(*) FROM packets WHERE video_id=? AND reviewed=0', (row['id'],)).fetchone()[0]:
             raise Problem('unread_material', '尚有日记或视频/评论材料未读取确认，不能完成这条视频。')
         evidence = json.loads(row['evidence'])
-        validate_diary(note, evidence, previous_mood(db))
-        record = dict(note, bvid=row['bvid'], video=evidence['video'],
+        quotes = validate_diary(note, evidence, previous_mood(db))
+        record = dict(note, quotes=quotes, bvid=row['bvid'], video=evidence['video'],
                       material_boundary=evidence['interpretation_boundary'],
                       comment_scope={k: v for k, v in evidence['comments'].items() if k != 'items'},
                       transcript_coverage=[{'part': t['part'], 'source': t['source'], 'coverage': t['coverage']} for t in evidence['transcripts']])

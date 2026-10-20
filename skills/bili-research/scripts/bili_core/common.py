@@ -45,11 +45,11 @@ def read_json(p):
 def credentials():
     p = home() / 'credentials.json'
     if not p.is_file():
-        raise Problem('setup_required', '需要用户在本机配置 B 站账号；不要把 Cookie 发到聊天中。',
-                      ['运行 configure 的本地隐藏输入，或提供本地凭据文件路径'])
+        raise Problem('setup_required', '需要配置 B 站账号。',
+                      ['运行 login，展示二维码并等待用户在 B 站 App 扫码确认'])
     d = read_json(p)
     if not isinstance(d, dict) or not isinstance(d.get('SESSDATA'), str) or not d['SESSDATA'].strip():
-        raise Problem('setup_required', '凭据文件缺少 SESSDATA。', ['重新运行 configure'])
+        raise Problem('setup_required', '凭据文件缺少 SESSDATA。', ['运行 login 重新扫码登录'])
     return d
 
 

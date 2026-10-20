@@ -44,6 +44,10 @@ class FakeClient:
 
 def diary(mood):
     return {'summary': '理解条件与反例。',
+            'quotes': [{'text': '第1部分知识点，反例和限定条件。', 'evidence_ids': ['t:p1:1'],
+                        'commentary': '这让我想先核对适用条件，再决定是否尝试。'},
+                       {'text': '另一个情境并不成立，请看反例。', 'evidence_ids': ['c:123'],
+                        'commentary': '评论没有展开细节，我还不能判断反例是否适用于我的情况。'}],
             'observations': [{'claim': '视频提出条件', 'evidence_ids': ['t:p1:1', 't:p2:1']},
                              {'claim': '评论补充反例', 'evidence_ids': ['c:123']}],
             'reflection': '这一案例使先前判断更有条件。', 'mood_before': mood,
@@ -117,7 +121,7 @@ class WorkflowTests(unittest.TestCase):
             self.assertEqual(result['report']['path'], str(page))
             content = page.read_text()
             self.assertEqual(content.count('<article id="entry-'), i + 1)
-            self.assertNotIn('<script>', content)
+            self.assertNotIn('<script>alert("external")</script>', content)
             self.assertIn('&lt;script&gt;', content)
         self.assertIn('第0篇', page.read_text())
         task2 = self.create()
@@ -257,6 +261,7 @@ class WorkflowTests(unittest.TestCase):
         with patch.object(c, 'comments', return_value={'status': 'closed', 'items': [], 'scope': 'comments_disabled'}):
             evidence = media.prepare(c, 'BV0000000001', OPTIONS)
         n = diary({'label': '平静、好奇', 'intensity': 2}); n['observations'].pop()
+        n['quotes'].pop()
         engine.validate_diary(n, evidence, n['mood_before'])
         self.assertEqual(evidence['comments']['status'], 'closed')
 
